@@ -1,45 +1,38 @@
-name: 🚀 OpenWebUI + SSH Tunnel
+name: 🚀 OpenWebUI Auto-Install + Tunnels
 on: 
   workflow_dispatch:
-    inputs:
-      expose_webui:
-        description: 'Expose OpenWebUI publicly?'
-        required: false
-        default: 'true'
-        type: boolean
 
 jobs:
-  setup-openwebui:
+  openwebui:
     runs-on: ubuntu-latest
     container: kalilinux/kali-rolling:latest
     timeout-minutes: 360
     
     steps:
-    - name: 🔧 Install Dependencies
+    - name: 🔧 System Setup
       run: |
         apt-get update && apt-get install -y \
-          docker.io docker-compose curl wget openssh-server sudo git procps htop
+          curl wget openssh-server sudo git procps htop docker.io
         
-    - name: 🐳 Setup Docker & User Permissions
-      run: |
-        systemctl start docker
-        usermod -aG docker kaliuser
-        echo 'kaliuser:kali2026' | chpasswd
-        useradd -m -s /bin/bash kaliuser || true
-        echo 'kaliuser ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/kaliuser
-        chmod 0440 /etc/sudoers.d/kaliuser
+        # Fix Docker (no systemd)
+        dockerd-entrypoint.sh & 
+        sleep 10
         
-    - name: 🌐 Start SSH Server
-      run: |
+        # SSH Setup
         ssh-keygen -A
         sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+        useradd -m -s /bin/bash kaliuser || true
+        echo 'kaliuser:kali2026' | chpasswd
+        echo 'kaliuser ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/kaliuser
+        chmod 0440 /etc/sudoers.d/kaliuser
         service ssh start
         
-    - name: 📦 Install & Start OpenWebUI
+    - name: 🐳 Docker Compose OpenWebUI
       run: |
-        cd /home/kaliuser
-        mkdir -p openwebui/{data,config,ollama}
-        cat > docker-compose.yml << 'EOF'
+        cd /home
+        mkdir -p kaliuser/openwebui/{data,config,ollama}
+        
+        cat > kaliuser/openwebui/docker-compose.yml << 'EOF'
         version: '3.8'
         services:
           openwebui:
@@ -51,7 +44,7 @@ jobs:
             ports:
               - "3000:8080"
             environment:
-              - WEBUI_SECRET_KEY=changeme
+              - WEBUI_SECRET_KEY=kali2026
             restart: unless-stopped
             
           ollama:
@@ -64,50 +57,43 @@ jobs:
             restart: unless-stopped
         EOF
         
-        chown -R kaliuser:kaliuser /home/kaliuser/openwebui
-        cd /home/kaliuser/openwebui
+        chown -R 1000:1000 kaliuser/openwebui
+        cd kaliuser/openwebui
         docker-compose up -d
         
-        # Wait for startup
-        sleep 30
-        curl -f http://localhost:3000 || echo "OpenWebUI starting..."
-        echo "✅ OpenWebUI ready at http://localhost:3000"
-        echo "📱 First login: admin@admin.com / admin (change immediately!)"
+        echo "⏳ Waiting for OpenWebUI..."
+        for i in {1..12}; do curl -f http://localhost:3000 && break || sleep 10; done
+        echo "✅ OpenWebUI LIVE: http://localhost:3000"
+        echo "📱 Login: admin@admin.com / admin"
         
-    - name: 🔗 SSH + WebUI Tunnel (Conditional)
-      if: inputs.expose_webui == 'true'
+    - name: 🌐 Dual Tunnels (SSH + OpenWebUI)
       run: |
         curl -Ls https://github.com/ekzhang/bore/releases/download/v0.5.1/bore-v0.5.1-x86_64-unknown-linux-musl.tar.gz | tar zx
         
-        echo "🚀 Starting tunnels..."
-        echo ""
-        echo "📡 SSH Tunnel:"
-        ./bore local 22 --to bore.pub &
-        SSH_PID=$!
-        sleep 3
-        
-        echo "🌐 OpenWebUI Tunnel:"
-        ./bore local 3000 --to bore.pub &
-        WEBUI_PID=$!
-        sleep 3
-        
-        echo ""
-        echo "✅ CONNECTION DETAILS:"
+        echo "🚀 LIVE CONNECTIONS:"
         echo "═══════════════════════"
-        ps aux | grep bore | grep -v grep | awk '{print "Port " $2 ": " $12 " → bore.pub:" $NF}' || true
+        
+        # SSH Tunnel
+        echo "📡 SSH:"
+        ./bore local 22 --to bore.pub &
+        SSH_PORT=$(lsof -i -P -n | grep LISTEN | grep bore | head -1 | awk '{print $9}' | cut -d: -f2)
+        echo "ssh kaliuser@bore.pub -p $SSH_PORT"
+        
+        # OpenWebUI Tunnel  
+        echo "🌐 OpenWebUI:"
+        ./bore local 3000 --to bore.pub &
+        WEBUI_PORT=$(lsof -i -P -n | grep LISTEN | grep bore | tail -1 | awk '{print $9}' | cut -d: -f2)
+        echo "http://bore.pub:$WEBUI_PORT"
+        
         echo ""
-        echo "💻 SSH: ssh kaliuser@bore.pub -p [SSH_PORT]"
-        echo "🌐 OpenWebUI: http://bore.pub:[WEBUI_PORT]"
         echo "👤 kaliuser : kali2026"
+        echo "⏰ Active 6 hours"
         echo ""
-        echo "Keeping tunnels alive..."
         
-        wait $SSH_PID $WEBUI_PID
+        # Health monitor
+        while true; do
+          docker ps | grep openwebui && service ssh status && echo "$(date): ALL SYSTEMS GO ✅"
+          sleep 60
+        done &
         
-    - name: 🛡️ SSH Only (No WebUI Exposure)
-      if: inputs.expose_webui == 'false'
-      run: |
-        curl -Ls https://github.com/ekzhang/bore/releases/download/v0.5.1/bore-v0.5.1-x86_64-unknown-linux-musl.tar.gz | tar zx
-        echo "🔒 SSH Only Mode"
-        echo "📱 ssh kaliuser@bore.pub -p [PORT]"
-        ./bore local 22 --to bore.pub
+        sleep 6h
