@@ -1,0 +1,113 @@
+name: 🚀 OpenWebUI + SSH Tunnel
+on: 
+  workflow_dispatch:
+    inputs:
+      expose_webui:
+        description: 'Expose OpenWebUI publicly?'
+        required: false
+        default: 'true'
+        type: boolean
+
+jobs:
+  setup-openwebui:
+    runs-on: ubuntu-latest
+    container: kalilinux/kali-rolling:latest
+    timeout-minutes: 360
+    
+    steps:
+    - name: 🔧 Install Dependencies
+      run: |
+        apt-get update && apt-get install -y \
+          docker.io docker-compose curl wget openssh-server sudo git procps htop
+        
+    - name: 🐳 Setup Docker & User Permissions
+      run: |
+        systemctl start docker
+        usermod -aG docker kaliuser
+        echo 'kaliuser:kali2026' | chpasswd
+        useradd -m -s /bin/bash kaliuser || true
+        echo 'kaliuser ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/kaliuser
+        chmod 0440 /etc/sudoers.d/kaliuser
+        
+    - name: 🌐 Start SSH Server
+      run: |
+        ssh-keygen -A
+        sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+        service ssh start
+        
+    - name: 📦 Install & Start OpenWebUI
+      run: |
+        cd /home/kaliuser
+        mkdir -p openwebui/{data,config,ollama}
+        cat > docker-compose.yml << 'EOF'
+        version: '3.8'
+        services:
+          openwebui:
+            image: ghcr.io/open-webui/open-webui:main
+            container_name: openwebui
+            volumes:
+              - ./data:/app/backend/data
+              - ./config:/app/config
+            ports:
+              - "3000:8080"
+            environment:
+              - WEBUI_SECRET_KEY=changeme
+            restart: unless-stopped
+            
+          ollama:
+            image: ollama/ollama:latest
+            container_name: ollama
+            volumes:
+              - ./ollama:/root/.ollama
+            ports:
+              - "11434:11434"
+            restart: unless-stopped
+        EOF
+        
+        chown -R kaliuser:kaliuser /home/kaliuser/openwebui
+        cd /home/kaliuser/openwebui
+        docker-compose up -d
+        
+        # Wait for startup
+        sleep 30
+        curl -f http://localhost:3000 || echo "OpenWebUI starting..."
+        echo "✅ OpenWebUI ready at http://localhost:3000"
+        echo "📱 First login: admin@admin.com / admin (change immediately!)"
+        
+    - name: 🔗 SSH + WebUI Tunnel (Conditional)
+      if: inputs.expose_webui == 'true'
+      run: |
+        curl -Ls https://github.com/ekzhang/bore/releases/download/v0.5.1/bore-v0.5.1-x86_64-unknown-linux-musl.tar.gz | tar zx
+        
+        echo "🚀 Starting tunnels..."
+        echo ""
+        echo "📡 SSH Tunnel:"
+        ./bore local 22 --to bore.pub &
+        SSH_PID=$!
+        sleep 3
+        
+        echo "🌐 OpenWebUI Tunnel:"
+        ./bore local 3000 --to bore.pub &
+        WEBUI_PID=$!
+        sleep 3
+        
+        echo ""
+        echo "✅ CONNECTION DETAILS:"
+        echo "═══════════════════════"
+        ps aux | grep bore | grep -v grep | awk '{print "Port " $2 ": " $12 " → bore.pub:" $NF}' || true
+        echo ""
+        echo "💻 SSH: ssh kaliuser@bore.pub -p [SSH_PORT]"
+        echo "🌐 OpenWebUI: http://bore.pub:[WEBUI_PORT]"
+        echo "👤 kaliuser : kali2026"
+        echo ""
+        echo "Keeping tunnels alive..."
+        
+        wait $SSH_PID $WEBUI_PID
+        
+    - name: 🛡️ SSH Only (No WebUI Exposure)
+      if: inputs.expose_webui == 'false'
+      run: |
+        curl -Ls https://github.com/ekzhang/bore/releases/download/v0.5.1/bore-v0.5.1-x86_64-unknown-linux-musl.tar.gz | tar zx
+        echo "🔒 SSH Only Mode"
+        echo "📱 ssh kaliuser@bore.pub -p [PORT]"
+        ./bore local 22 --to bore.pub
